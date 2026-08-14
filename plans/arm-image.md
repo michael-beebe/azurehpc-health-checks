@@ -69,16 +69,16 @@ Keep multi-stage: **builder → runtime**.
 
 | Component | x86 today | aarch64 action |
 |-----------|-----------|----------------|
-| CUDA base | 12.4.1 U22.04 | Use NGC **arm64** tag that supports host driver + Blackwell; likely **newer than 12.4** |
-| Ubuntu in image | 22.04 | Match CUDA image distro (22.04 or 24.04) |
-| MOFED | 23.07 x86_64 | aarch64 package for same/compatible distro; confirm Grace/IB stack |
-| OpenMPI | 5.0.5 | source build (same); drop/fix mellanox platform flag if configure fails on arm |
-| NCCL | image `libnccl2` | must support Blackwell; may need newer package/CUDA |
-| nccl-tests | 2.13.8 | source build against container CUDA/NCCL |
-| perftest | 23.10.0 | source build; GDR needs `CUDA_H_PATH` |
-| nvbandwidth | 0.4 | bump if needed for Blackwell; arches e.g. `90;100` (**confirm B300 sm**) |
+| CUDA base | 12.4.1 U22.04 | **Confirmed:** `nvcr.io/nvidia/cuda:13.0.0-devel-ubuntu24.04` (arm64) — 12.6.3 lacks Blackwell (`compute_100/103`); 13.0.0 has it |
+| Ubuntu in image | 22.04 | **24.04** (matches CUDA 13 arm64 image; host is also 24.04) |
+| MOFED | 23.07 x86_64 | **No MOFED tarball for arm.** Use DOCA-Host public apt repo (`linux.mellanox.com/public/repo/doca/3.3.0/ubuntu24.04/arm64-sbsa/`), install specific `rdma-core`/`perftest`/`ucx` packages (NOT `doca-all`/`doca-networking-runtime` meta-packages — too heavy). Versions match host exactly (`rdma-core` 2601.0.7-1). |
+| OpenMPI | 5.0.5 | source build (same); drop/fix mellanox platform flag if configure fails on arm — **not yet validated** |
+| NCCL | image `libnccl2` | CUDA13 sbsa apt repo only has NCCL up to `2.27.7-1+cuda12.9` (no cuda13 build yet) — build from source against container CUDA/NCCL like x86 does, don't rely on apt package |
+| nccl-tests | 2.13.8 | source build against container CUDA/NCCL — not yet validated on arm |
+| perftest | 23.10.0 (source build) | **Likely no source build needed** — DOCA repo ships prebuilt `perftest 26.01.5-1` with `--use_cuda`/`--use_cuda_dmabuf`/`--use_data_direct` GDR flags already present. Still need an end-to-end GDR run to confirm (only `--help` checked so far) |
+| nvbandwidth | 0.4 | bump if needed for Blackwell; arches **`100;103`** confirmed via `nvcc --list-gpu-arch` on CUDA 13.0.0 arm64 (host GPU compute_cap is `10.3`) |
 | NHC | 1.4.3 | source build (perl/bash; should be arch-ok) |
-| STREAM | AOCC amd64 | **no AOCC on arm** — build with `gcc`/`clang -fopenmp`, or ship STREAM only on x86 image |
+| STREAM | AOCC amd64 | **no AOCC on arm** — build with `gcc`/`clang -fopenmp`, or ship STREAM only on x86 image — not yet validated |
 
 STREAM is only required for HB/HX CPU confs. Arm image can:
 
@@ -93,12 +93,62 @@ Prefer (1) if cheap so the arm image stays a superset for future CPU Grace SKUs.
 
 ### 1. Research / pins (half-day on node)
 
-- [ ] `uname -m`, driver version, `nvidia-smi`
-- [ ] Confirm docker + NVIDIA container toolkit on Grace
-- [ ] Choose CUDA base image digest/tag that pulls on aarch64 and sees GPUs with `--gpus all`
-- [ ] Locate MOFED aarch64 user-space tarball matching distro
-- [ ] Note NCCL package version in that CUDA image
-- [ ] Confirm Blackwell GPU arch id for nvcc (`sm_100` / `sm_103` / etc.)
+- [x] `uname -m`, driver version, `nvidia-smi` — done on a real ND128isr_GB300_v6 node (see findings below)
+- [x] Confirm docker + NVIDIA container toolkit on Grace — confirmed working
+- [x] Choose CUDA base image digest/tag that pulls on aarch64 and sees GPUs with `--gpus all` — `nvcr.io/nvidia/cuda:13.0.0-devel-ubuntu24.04`
+- [x] Locate MOFED aarch64 user-space tarball matching distro — **no tarball; use DOCA-Host apt repo instead (see below)**
+- [x] Note NCCL package version in that CUDA image — see below (may need source build for CUDA 13)
+- [x] Confirm Blackwell GPU arch id for nvcc (`sm_100` / `sm_103` / etc.) — **`compute_103`/`sm_103`** (host reports compute_cap `10.3`)
+
+#### Findings (from a live ND128isr_GB300_v6 node, 2026-08-14)
+
+| Item | Value |
+|------|-------|
+| `uname -m` | `aarch64` |
+| OS | Ubuntu 24.04.4 LTS (noble) |
+| Kernel | `6.17.0-1005-azure-nvidia` |
+| NVIDIA driver | `580.126.20` |
+| GPU | 4× `NVIDIA GB300`, compute_cap `10.3` → nvcc arch `compute_103`/`sm_103` |
+| Host CUDA toolkit | `13.0.2` (`cuda-toolkit-13-0`) |
+| Docker | 29.2.1, `nvidia` runtime installed (`libnvidia-container` 1.18.2), default runtime still `runc` — must pass `--gpus all` |
+| CPU | 2× socket, Neoverse-V2, 128 vCPU total, NUMA reported as **34 nodes** (not 2 — verify NHC `check_hw_cpuinfo`/topology parsing handles this) |
+| Memory | 862 GiB total |
+| NVMe | 4 data disks (3.84 TB Micrsoft NVMe Direct Disk v2 each) + 1 small 68GB "MSFT NVMe Accelerator" boot/temp disk (5 nvme devices total, not 4 — confirm which are health-checked) |
+| IB | 4× `mlx5_ib0..3`, **800 Gb/sec (4X XDR)**, link_layer InfiniBand |
+| Net | `eth0`/`eth1` (bond members), no visible `mlx5_an0` accelerated-network device |
+
+**CUDA base image arch support (critical pin):**
+- `nvcr.io/nvidia/cuda:12.6.3-devel-ubuntu24.04` (arm64) pulls fine and sees GPUs, but `nvcc --list-gpu-arch` tops out at `compute_90` — **no Blackwell support**.
+- `nvcr.io/nvidia/cuda:13.0.0-devel-ubuntu24.04` (arm64) pulls fine, sees GPUs, and lists `compute_100/103/110/120/121` — **this is the correct base**, confirming the plan's suspicion that x86's CUDA 12.4 must be bumped for the arm image.
+- **Decision: pin arm image to CUDA 13.0.x, not 12.4.1.**
+
+**MOFED replacement — DOCA-Host (major finding):**
+The host does **not** use a classic `MLNX_OFED_*.tgz` tarball. It uses NVIDIA **DOCA-Host** (`doca-host` apt package, installed version `3.3.0-088000-26.01-ubuntu2404`), which lives in a *local* repo (`/usr/share/doca-host-.../repo`) set up by a downloaded installer. However, DOCA also publishes a **public, unauthenticated network apt repo** that mirrors host package versions exactly:
+
+```bash
+wget -qO - https://linux.mellanox.com/public/repo/doca/GPG-KEY-Mellanox.pub | gpg --dearmor -o /usr/share/keyrings/GPG-KEY-Mellanox.pub
+echo "deb [signed-by=/usr/share/keyrings/GPG-KEY-Mellanox.pub] https://linux.mellanox.com/public/repo/doca/3.3.0/ubuntu24.04/arm64-sbsa/ ./" \
+  > /etc/apt/sources.list.d/doca.list
+apt-get update
+```
+Verified reachable (HTTP 200) and verified in a throwaway `ubuntu:24.04` arm64 container:
+- `rdma-core` candidate `2601.0.7-1` — **matches host exactly**.
+- Installing `rdma-core ibverbs-providers libibverbs-dev librdmacm-dev libibumad-dev infiniband-diags` works cleanly (only harmless udev "Read-only file system" warnings, expected in containers).
+- Avoid the `doca-networking-runtime`/`doca-all` meta-packages — they drag in OVS, DPDK, telemetry, etc. (way too heavy for a compute-node health-check image). Install the **specific rdma-core/perftest/ucx packages directly** instead.
+- **`perftest` is available prebuilt from this repo at `26.01.5-1`** and its `ib_write_bw --help` already lists `--use_cuda`, `--use_cuda_dmabuf`, `--use_data_direct` (GPUDirect RDMA flags) — **we likely do NOT need to build perftest from source on arm** (unlike the x86 image, which builds perftest 23.10.0 from source). Big Dockerfile simplification if this holds up under a real GDR run.
+- `ucx` also available prebuilt at `1.20.0-1.20260211...` matching host.
+
+**Decision: replace the x86 "download MLNX_OFED tarball + run mlnxofedinstall" step with "add the DOCA public apt repo + apt-get install specific rdma-core/perftest/ucx packages" for the arm Dockerfile.** This is simpler than the x86 approach, not just a port.
+
+**NCCL package version:** CUDA 13.0 sbsa apt repo only publishes NCCL up to `2.27.7-1+cuda12.9` (no `+cuda13.x` build yet as of this check). Since nccl-tests/NCCL need to be source-built anyway per the existing x86 process, this isn't blocking, but note NCCL apt packages lag the CUDA 13 host toolkit — building against source or the bundled NCCL in the CUDA devel image is the safer path (as x86 already does).
+
+**Still open / not yet validated:**
+- [ ] Actually run `ib_write_bw --use_cuda` GDR loopback test inside a container on this node to confirm the packaged perftest truly works end-to-end with GPUDirect (only `--help` output checked so far).
+- [ ] OpenMPI 5.0.5 source build on arm (mellanox platform flag behavior unconfirmed).
+- [ ] nvbandwidth build with `CMAKE_CUDA_ARCHITECTURES=100;103` (or whatever final list) against CUDA 13.
+- [ ] STREAM: confirm GCC OpenMP build works and is close enough numerically to AOCC baseline expectations (only matters for future CPU/Grace confs, not GB300 GPU conf).
+- [ ] 34 NUMA nodes reported by `lscpu` (not 2 sockets as naively expected) — check how this affects `check_hw_cpuinfo`, `check_hw_topology`, and any NUMA-aware binding logic (`numactl -N $numa_node` in `azure_ib_write_bw_gdr.nhc`) before assuming x86-style 1-socket-per-NUMA-node logic holds.
+- [ ] 5 nvme devices visible (1 small boot-ish disk + 4 large data disks) vs. plan's "4 disks" — confirm which the SKU doc/health check should count.
 
 ### 2. Dockerfile
 
@@ -224,20 +274,25 @@ Unchanged on purpose: `conf/*`, `customTests/*` (except if STREAM makefile needs
 
 | Risk | Mitigation |
 |------|------------|
-| CUDA 12.4 too old for B300 | Newer NGC arm base; pin tested driver↔CUDA combo |
-| No MOFED aarch64 for chosen Ubuntu | Align Ubuntu to available MOFED; or use DOCA/host OFED libs (last resort) |
-| OpenMPI mellanox platform flag fails | Configure without `--with-platform=...` on arm |
-| nvbandwidth won’t build for Blackwell | Upgrade nvbandwidth; set correct `CMAKE_CUDA_ARCHITECTURES` |
-| AOCC unavailable | GCC OpenMP STREAM or omit |
-| Host OFED vs container OFED mismatch | user-space-only install; match major version to host if IB fails |
+| CUDA 12.4 too old for B300 | **Resolved:** pin to CUDA 13.0.x arm64 (confirmed has `compute_100/103`) |
+| No MOFED aarch64 for chosen Ubuntu | **Resolved:** no tarball; use DOCA-Host public apt repo (`linux.mellanox.com/public/repo/doca/3.3.0/ubuntu24.04/arm64-sbsa/`), install specific rdma-core/perftest/ucx packages, skip heavy `doca-all`/networking-runtime meta-packages |
+| OpenMPI mellanox platform flag fails | Configure without `--with-platform=...` on arm — still to be validated |
+| nvbandwidth won’t build for Blackwell | Set `CMAKE_CUDA_ARCHITECTURES=100;103` (confirmed via CUDA 13.0.0 `nvcc --list-gpu-arch`) |
+| AOCC unavailable | GCC OpenMP STREAM or omit — still to be validated |
+| Host OFED vs container OFED mismatch | **Resolved via DOCA apt repo** — package versions (`rdma-core` 2601.0.7-1) matched host exactly in testing |
 | Image large / slow build | Keep multi-stage; no change to shrink goals beyond x86 parity |
+| 34 NUMA nodes reported (not 2 sockets) | New risk found during inventory — verify `check_hw_cpuinfo`/topology/`numactl -N` binding logic in `azure_ib_write_bw_gdr.nhc` handles this before assuming x86-style numbering |
+| 5 nvme devices vs 4 expected | New risk found during inventory — 1 is a small "MSFT NVMe Accelerator" boot-adjacent disk; confirm which count the GB300 conf should check |
 
 ### Open decisions (resolve in PR description)
 
 - [ ] Final image name/tag
-- [ ] Final CUDA / MOFED / NCCL versions
+- [x] Final CUDA version — **13.0.x arm64** (`nvcr.io/nvidia/cuda:13.0.0-devel-ubuntu24.04` or later 13.0.z patch)
+- [x] MOFED replacement — **DOCA-Host public apt repo**, not a tarball
+- [ ] Final NCCL version (source build against CUDA 13, apt package lags at +cuda12.9)
 - [ ] STREAM: build with GCC vs omit on arm
 - [ ] Whether `cuda` build_type auto-picks arm on aarch64 hosts
+- [ ] Whether to source-build perftest at all, or trust the DOCA apt package (26.01.5-1) after an end-to-end GDR validation run
 
 ---
 
