@@ -142,13 +142,22 @@ Verified reachable (HTTP 200) and verified in a throwaway `ubuntu:24.04` arm64 c
 
 **NCCL package version:** CUDA 13.0 sbsa apt repo only publishes NCCL up to `2.27.7-1+cuda12.9` (no `+cuda13.x` build yet as of this check). Since nccl-tests/NCCL need to be source-built anyway per the existing x86 process, this isn't blocking, but note NCCL apt packages lag the CUDA 13 host toolkit — building against source or the bundled NCCL in the CUDA devel image is the safer path (as x86 already does).
 
+**Update 2026-08-14 — Dockerfile written and built successfully end-to-end** (`dockerfile/azure-nvrt-nhc-aarch64.dockerfile` on branch `feature/aznhc-nv-aarch64`):
+
+- [x] Full multi-stage build (49 steps) completed on the live GB300 node with no manual intervention beyond one fix (below).
+- [x] `nvidia-smi -L` inside container lists all 4 GB300 GPUs (`--gpus all --privileged --net=host`).
+- [x] **nccl-tests build fix required:** its default `NVCC_GENCODE` targets legacy archs (`compute_35/50/60/61/70/80`) that CUDA 13's `nvcc` rejects outright (`nvcc fatal: Unsupported gpu architecture 'compute_60'`). Fixed by passing `NVCC_GENCODE="-gencode=arch=compute_90,code=sm_90 -gencode=arch=compute_100,code=sm_100 -gencode=arch=compute_103,code=sm_103 -gencode=arch=compute_103,code=compute_103"` explicitly to `make`. Same class of issue would hit any other CUDA-13-era source build with hardcoded old gencode flags — watch for it.
+- [x] OpenMPI 5.0.5 built fine from source on arm64 using `--with-verbs --with-rdmacm` (dropped the x86 `--with-platform=contrib/platform/mellanox/optimized` flag entirely rather than trying to fix it — simpler and worked first try).
+- [x] nvbandwidth v0.10.0 built with `CMAKE_CUDA_ARCHITECTURES="90;100;103"` and **ran successfully** inside the container: `device_to_host_memcpy_ce` measured ~193.5 GB/s per GPU (774 GB/s summed across 4 GPUs), CoV 0.00.
+- [x] NCCL allreduce (`all_reduce_perf` from nccl-tests, single-node, 4 ranks, 8MB, `--map-by ppr:4:node -bind-to numa`) **ran successfully**: ~290 GB/s avg bus bandwidth over NVLink — matches the existing `azure_nccl_allreduce.nhc` invocation pattern.
+- [x] `ib_write_bw` (DOCA-packaged, GDR loopback via `--use_cuda=0` against own hostname) **ran successfully after loading `nvidia_peermem`**: measured 420 Gb/sec. **Important operational note:** the `nvidia_peermem` kernel module was NOT loaded on this host by default (`lsmod` showed nothing); GPUDirect RDMA memory registration fails with `Couldn't allocate MR with error=14` until it's loaded (`sudo modprobe nvidia-peermem`, module present at `/lib/modules/$(uname -r)/updates/dkms/nvidia-peermem.ko.zst`). This is a **host/image-provisioning prerequisite**, not something the container can fix — needs a callout in docs/developer_guide (and possibly a pre-flight check in `run-health-checks.sh` or the GDR test itself) so a missing module doesn't get misread as a hardware fault.
+- [x] STREAM omitted from the arm image as planned (documented in the Dockerfile header comment); not needed for GB300 GPU conf.
+
 **Still open / not yet validated:**
-- [ ] Actually run `ib_write_bw --use_cuda` GDR loopback test inside a container on this node to confirm the packaged perftest truly works end-to-end with GPUDirect (only `--help` output checked so far).
-- [ ] OpenMPI 5.0.5 source build on arm (mellanox platform flag behavior unconfirmed).
-- [ ] nvbandwidth build with `CMAKE_CUDA_ARCHITECTURES=100;103` (or whatever final list) against CUDA 13.
-- [ ] STREAM: confirm GCC OpenMP build works and is close enough numerically to AOCC baseline expectations (only matters for future CPU/Grace confs, not GB300 GPU conf).
 - [ ] 34 NUMA nodes reported by `lscpu` (not 2 sockets as naively expected) — check how this affects `check_hw_cpuinfo`, `check_hw_topology`, and any NUMA-aware binding logic (`numactl -N $numa_node` in `azure_ib_write_bw_gdr.nhc`) before assuming x86-style 1-socket-per-NUMA-node logic holds.
 - [ ] 5 nvme devices visible (1 small boot-ish disk + 4 large data disks) vs. plan's "4 disks" — confirm which the SKU doc/health check should count.
+- [ ] Real (non-loopback) multi-HCA IB bandwidth across all 4 `mlx5_ib0..3` devices simultaneously (only device 0 loopback tested so far).
+- [ ] `run-health-checks.sh` arch-based image selection, `build_image.sh`/`pull-image-mcr.sh` `cuda-arm` target, and `test/unit-tests/run_tests.sh` image name — not yet wired up (Dockerfile-only so far, per commit plan step 1).
 
 ### 2. Dockerfile
 
