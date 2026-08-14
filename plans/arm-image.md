@@ -13,10 +13,10 @@ Ship an **aarch64 NVIDIA** container that can run the existing NHC entrypoint an
 
 **Done when** (on a Grace+NVIDIA node):
 
-- [ ] Image builds natively on aarch64
-- [ ] `run-health-checks.sh` selects it automatically when `uname -m == aarch64` and NVIDIA is present
-- [ ] Inside container: `nvidia-smi`, `nhc`, `mpirun`, `all_reduce_perf`, `ib_write_bw`, `nvbandwidth` all run
-- [ ] x86 path unchanged (`aznhc-nv` still used on x86_64)
+- [x] Image builds natively on aarch64
+- [x] `run-health-checks.sh` selects it automatically when `uname -m == aarch64` and NVIDIA is present
+- [x] Inside container: `nvidia-smi`, `nhc`, `mpirun`, `all_reduce_perf`, `ib_write_bw`, `nvbandwidth` all run
+- [x] x86 path unchanged (`aznhc-nv` still used on x86_64) — code path untouched, not independently re-verified on an x86 host this session
 - [ ] Docs cover build/pull for arm
 
 **Out of scope**
@@ -201,10 +201,14 @@ else                  → arch-appropriate NV image (CPU checks)
 
 Also update:
 
-- [ ] `test/unit-tests/run_tests.sh` hard-coded `aznhc-nv`
+- [x] `test/unit-tests/run_tests.sh` hard-coded `aznhc-nv` — done, arch-aware now
 - [ ] Any docs examples using a single image name
 
 Do **not** change conf/AN/SKU logic in this PR.
+
+**Status: implemented and validated** (`feature/aznhc-nv-aarch64` branch, commit `6880988`). `build_image.sh cuda-arm` / `pull-image-mcr.sh cuda-arm` added; a plain `cuda` request auto-defaults to `cuda-arm` on an aarch64 host. `run-health-checks.sh` picks `aznhc-nv:aarch64` for NVIDIA+aarch64 (and for the CPU-fallback branch on aarch64 too, since there's no separate CPU-only arm image). Verified live: `sudo ./run-health-checks.sh -c conf/nd96isr_h100_v5.conf -v -t 30` on the GB300 node launched the aarch64 container (confirmed via the CUDA 13.0.0 banner) and NHC executed inside it — reported a real check failure as expected (see note below), not a tooling/image error.
+
+**New finding from this smoke test:** `check_hw_cpuinfo` reported "Actual CPU socket count (128) does not match expected (2)" when run with the x86 H100 conf's `check_hw_cpuinfo 2 ...` line. NHC's socket-counting logic appears to treat each of Grace's 128 vCPUs as its own socket on this platform (consistent with the earlier `lscpu`-reported "34 NUMA nodes" oddity). **This is a real gb300.md WS3 concern, not an arm-image blocker** — flagging here for visibility since it was discovered during arm-image validation, but the fix (correct `check_hw_cpuinfo` argument/interpretation for Grace) belongs in the GB300 conf/check work, not this image.
 
 ### 5. Docs
 
