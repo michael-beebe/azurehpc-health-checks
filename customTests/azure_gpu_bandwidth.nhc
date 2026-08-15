@@ -162,6 +162,7 @@ function check_nvBW_gpu_bw()
     IFS=$' \t\n'
 
     current_test=""
+    in_trailer=false
 
     # Extract the lines for each test
     for line in "${nvout[@]}"; do
@@ -173,9 +174,20 @@ function check_nvBW_gpu_bw()
             # Set current test and remove extra spaces and dots
             current_test="${line#Running}" && current_test="${current_test//./}" && current_test="${current_test#"${current_test%%[![:space:]]*}"}"
             extracted_lines=""
+            in_trailer=false
         fi
 
-        if [[ ! "$line" == *"memcpy"*  ]]; then
+        # Skip the header ("...memcpy...") line and the trailing summary
+        # block (SUM/COEFFICIENT_OF_VARIATION/NOTE + its continuation
+        # lines/blank line) that newer nvbandwidth versions (e.g. v0.10.0
+        # used on the aarch64 image) print after each test's table; once
+        # the trailer starts, everything until the next "Running" line is
+        # non-data and must be skipped so it isn't parsed as a bogus row.
+        if [[ "$line" == SUM* ]] || [[ "$line" == COEFFICIENT_OF_VARIATION* ]] || [[ "$line" == NOTE:* ]]; then
+            in_trailer=true
+        fi
+
+        if [[ "$in_trailer" == false ]] && [[ ! "$line" == *"memcpy"* ]] && [[ -n "$line" ]]; then
             extracted_lines+="$line"$'\n'
         fi
     done
