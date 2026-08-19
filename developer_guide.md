@@ -1,6 +1,9 @@
 # Az NHC Developer Guide #
 
-Az NHC is ran inside an Ubuntu 22.04 docker container. See instructions for how to address changes in the docker image.
+Az NHC runs inside a Docker container. The x86_64 NVIDIA and AMD images use
+Ubuntu 22.04; the Grace-based aarch64 NVIDIA image uses Ubuntu 24.04 with
+CUDA 13 and DOCA-Host packages. See the instructions below when changing a
+Docker image.
 
 ## Pre-requisites ##
 

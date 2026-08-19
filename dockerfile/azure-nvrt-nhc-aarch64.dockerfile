@@ -1,4 +1,11 @@
-# aarch64 (Grace/Blackwell) variant of azure-nvrt-nhc.dockerfile
+# aarch64 (Grace/Blackwell) variant of azure-nvrt-nhc.dockerfile.
+#
+# Key differences from the x86_64 NVIDIA image:
+# - Ubuntu 24.04 with CUDA 13 for Blackwell support, rather than Ubuntu 22.04.
+# - NVIDIA DOCA-Host packages provide the arm64 RDMA stack because MLNX_OFED
+#   does not publish the aarch64 build used by the x86_64 image.
+# - STREAM is omitted because this image is for GPU-focused Grace/Blackwell
+#   SKUs and the existing STREAM build path is x86_64-specific.
 
 ################################################################################
 # STAGE 1: Builder — compile all tools using the full CUDA devel image
@@ -185,4 +192,3 @@ COPY customTests/*.nhc /etc/nhc/scripts/
 COPY conf ${AZ_NHC_ROOT}/default/conf
 COPY dockerfile/aznhc-entrypoint.sh ${AZ_NHC_ROOT}
 RUN chmod +x ${AZ_NHC_ROOT}/aznhc-entrypoint.sh
-

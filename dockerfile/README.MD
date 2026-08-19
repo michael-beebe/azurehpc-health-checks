@@ -2,7 +2,9 @@
 
 ## OverView ##
 
-Azure NHC is run within an Ubuntu 22.04 docker container with either Nvidia or AMD runtime enabled.
+Azure NHC runs in Docker containers with either the Nvidia or AMD runtime
+enabled. The x86_64 images use Ubuntu 22.04; the Grace-based aarch64 Nvidia
+image uses Ubuntu 24.04.
 
 There are two ways of running Az NHC, with the provided run script and also as a stand alone container.
 
