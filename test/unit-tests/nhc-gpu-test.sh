@@ -35,7 +35,6 @@ done
     result=$(check_gpu_bw 1 1)
     status=$?
     set -e
-    echo "$result"
     [[ "$result" != *"ERROR"* ]] && [[ $status -eq 0 ]]
 }
 
@@ -43,7 +42,6 @@ done
     set +e
     result=$(check_gpu_bw 500 500)
     set -e
-    echo "$result"
     [[ "$result" == *"ERROR"* ]]
 }
 
@@ -77,7 +75,6 @@ done
     result=$(check_nccl_allreduce 1.0 1 8G $topo_file)
     status=$?
     set -e
-    echo "$result"
     [[ "$result" != *"ERROR"* ]] && [[ $status -eq 0 ]]
 }
 
@@ -86,7 +83,6 @@ done
     topo_file=$(get_topofile)
     result=$(check_nccl_allreduce 600.0 1 8G $topo_file)
     set -e
-    echo "$result"
     [[ "$result" == *"ERROR"* ]]
 }
 
@@ -103,7 +99,6 @@ done
     fi
     status=$?
     set -e
-    echo "$result"
     [[ "$result" != *"ERROR"* ]] && [[ $status -eq 0 ]]
 }
 
@@ -119,7 +114,6 @@ done
         result="ERROR"
     fi
     set -e
-    echo "$result"
     [[ "$result" == *"ERROR"* ]]
 }
 
