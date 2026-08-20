@@ -1,11 +1,4 @@
 # aarch64 (Grace/Blackwell) variant of azure-nvrt-nhc.dockerfile.
-#
-# Key differences from the x86_64 NVIDIA image:
-# - Ubuntu 24.04 with CUDA 13 for Blackwell support, rather than Ubuntu 22.04.
-# - NVIDIA DOCA-Host packages provide the arm64 RDMA stack because MLNX_OFED
-#   does not publish the aarch64 build used by the x86_64 image.
-# - STREAM is omitted because this image is for GPU-focused Grace/Blackwell
-#   SKUs and the existing STREAM build path is x86_64-specific.
 
 ################################################################################
 # STAGE 1: Builder — compile all tools using the full CUDA devel image
@@ -106,8 +99,7 @@ RUN cd /tmp && \
     mkdir -p ${AZ_NHC_ROOT} && \
     mv /tmp/lbnl-nhc-${NHC_VERSION}* ${AZ_NHC_ROOT}
 
-# Build nvbandwidth (bumped to v0.10.0 for Blackwell; CMAKE_CUDA_ARCHITECTURES
-# derived from CUDA_ARCH_LIST, see top of file)
+# Build nvbandwidth for the configured CUDA architectures
 RUN cd /tmp && \
     wget -q -O - https://github.com/NVIDIA/nvbandwidth/archive/refs/tags/v${NV_BANDWIDTH_VERSION}.tar.gz | tar -xz && \
     cd nvbandwidth-${NV_BANDWIDTH_VERSION} && \
@@ -159,7 +151,6 @@ RUN apt-get update -y && DEBIAN_FRONTEND=noninteractive \
     && rm -rf /var/lib/apt/lists/*
 
 # Install IB user-space runtime libraries from the DOCA-Host public apt repo
-# (aarch64 replacement for the x86 MLNX_OFED tarball install)
 RUN wget -qO - https://linux.mellanox.com/public/repo/doca/GPG-KEY-Mellanox.pub | \
     gpg --dearmor -o /usr/share/keyrings/doca-mellanox.gpg && \
     echo "deb [signed-by=/usr/share/keyrings/doca-mellanox.gpg] https://linux.mellanox.com/public/repo/doca/${DOCA_VERSION}/ubuntu24.04/arm64-sbsa/ ./" \
