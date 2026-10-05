@@ -103,3 +103,242 @@ function check_ib_bw_gdr(){
 
    return 0
 }
+
+function parse_ib_gdr_index_endpoint(){
+   local endpoint=$1
+   local device=${endpoint%%:*}
+   local gpu_index=${endpoint##*:}
+
+   if [[ "$device" == "$endpoint" || -z "$device" || ! "$gpu_index" =~ ^[0-9]+$ ]]; then
+      return 1
+   fi
+
+   echo "$device $gpu_index"
+}
+
+function stop_ib_write_bw_gdr_server(){
+   local server_pid=$1
+
+   if kill -0 "$server_pid" 2>/dev/null; then
+      kill "$server_pid" 2>/dev/null
+   fi
+   wait "$server_pid" 2>/dev/null
+   return 0
+}
+
+function run_ib_bw_gdr_datadirect(){
+   local expected_bw=$1
+   local port=$2
+   local server_device=$3
+   local server_gpu=$4
+   local client_device=$5
+   local client_gpu=$6
+   local repeats=$7
+   local require_fabric=$8
+   local message_size=8388608
+   local iterations=5000
+   local server_numa
+   local client_numa
+   local server_log="/tmp/aznhc_ib_write_bw_gdr_${port}_$$.log"
+   local args="-p $port -s $message_size -n $iterations -x 0 -F --report_gbits --perform_warm_up"
+
+   if ! server_numa=$(get_ib_numa_node "$server_device") ||
+      ! client_numa=$(get_ib_numa_node "$client_device"); then
+      return 1
+   fi
+
+   if [[ "$require_fabric" == true ]]; then
+      local server_lid_file="/sys/class/infiniband/$server_device/ports/1/lid"
+      local client_lid_file="/sys/class/infiniband/$client_device/ports/1/lid"
+      if [[ "$server_device" == "$client_device" ||
+            ! -r "$server_lid_file" || ! -r "$client_lid_file" ||
+            "$(cat "$server_lid_file")" == "$(cat "$client_lid_file")" ]]; then
+         return 1
+      fi
+   fi
+
+   for iter in $(seq 1 "$repeats"); do
+      local before_xmit=0
+      local before_recv=0
+      local client_output
+      local client_rc
+      local server_rc
+      local bandwidth
+
+      if [[ "$require_fabric" == true ]]; then
+         before_xmit=$(cat "/sys/class/infiniband/$client_device/ports/1/counters/port_xmit_data") || return 1
+         before_recv=$(cat "/sys/class/infiniband/$server_device/ports/1/counters/port_rcv_data") || return 1
+      fi
+
+      env CUDA_DEVICE_ORDER=PCI_BUS_ID numactl -N "$server_numa" -m "$server_numa" \
+         "$IB_WRITE_BW_EXE_PATH" $args --use_cuda="$server_gpu" \
+         --use_cuda_dmabuf --use_data_direct \
+         -d "$server_device" >"$server_log" 2>&1 &
+      local server_pid=$!
+      sleep "$SLEEP_TIME"
+
+      client_output=$(env CUDA_DEVICE_ORDER=PCI_BUS_ID \
+         numactl -N "$client_numa" -m "$client_numa" \
+         "$IB_WRITE_BW_EXE_PATH" $args --use_cuda="$client_gpu" \
+         --use_cuda_dmabuf --use_data_direct \
+         -d "$client_device" "$HOSTNAME" 2>&1)
+      client_rc=$?
+
+      if (( client_rc != 0 )); then
+         stop_ib_write_bw_gdr_server "$server_pid"
+         server_rc=1
+      else
+         wait "$server_pid"
+         server_rc=$?
+      fi
+
+      if (( client_rc != 0 || server_rc != 0 )); then
+         dbg "$(cat "$server_log")"
+         dbg "$client_output"
+         continue
+      fi
+
+      bandwidth=$(awk -v size="$message_size" \
+         '$1 == size && $4 ~ /^[0-9]+([.][0-9]+)?$/ { print $4; exit }' \
+         <<< "$client_output")
+      if [[ -z "$bandwidth" ]]; then
+         dbg "$client_output"
+         continue
+      fi
+
+      if [[ "$require_fabric" == true ]]; then
+         local after_xmit
+         local after_recv
+         after_xmit=$(cat "/sys/class/infiniband/$client_device/ports/1/counters/port_xmit_data") || return 1
+         after_recv=$(cat "/sys/class/infiniband/$server_device/ports/1/counters/port_rcv_data") || return 1
+         if (( after_xmit <= before_xmit || after_recv <= before_recv )); then
+            continue
+         fi
+      fi
+
+      dbg "Measured DataDirect bandwidth $bandwidth Gbps for $client_device/GPU$client_gpu -> $server_device/GPU$server_gpu"
+      if (( $(echo "$bandwidth >= $expected_bw" | bc -l) )); then
+         rm -f "$server_log"
+         return 0
+      fi
+   done
+
+   rm -f "$server_log"
+   return 1
+}
+
+function check_ib_bw_gdr_loopback(){
+   trap "background_cleanup" RETURN
+
+   local expected_bw=$1
+   local repeats=$2
+   shift 2
+   local -a endpoints=("$@")
+   local -a failures=()
+   local device_output
+   local -a devices
+   local port=18510
+
+   if (( ${#endpoints[@]} == 0 )); then
+      die 1 "$FUNCNAME: Specify endpoints as IB_DEVICE:GPU_INDEX. FaultCode: NHCNA"
+      return 0
+   fi
+   if ! device_output=$(determine_IB_devices); then
+      die 1 "$FUNCNAME: Failed to determine IB devices. FaultCode: NHCNA"
+      return 0
+   fi
+   read -ra devices <<< "$device_output"
+
+   boost_gpu_clock >/dev/null || {
+      die 1 "$FUNCNAME: Failed to boost GPU clocks. FaultCode: NHCNA"
+      return 0
+   }
+   print_pkeys "$FUNCNAME"
+
+   for endpoint in "${endpoints[@]}"; do
+      local parsed_endpoint
+      local device
+      local gpu_index
+      if ! parsed_endpoint=$(parse_ib_gdr_index_endpoint "$endpoint"); then
+         failures+=("$endpoint")
+         continue
+      fi
+      read -r device gpu_index <<< "$parsed_endpoint"
+      if [[ ! " ${devices[*]} " =~ " $device " ]] ||
+         ! run_ib_bw_gdr_datadirect "$expected_bw" "$port" \
+            "$device" "$gpu_index" "$device" "$gpu_index" "$repeats" false; then
+         failures+=("$endpoint")
+      fi
+      ((port++))
+   done
+
+   remove_clock_boost
+
+   if (( ${#failures[@]} > 0 )); then
+      die 1 "$FUNCNAME: DataDirect loopback failed for: ${failures[*]} (expected >= $expected_bw Gbps). FaultCode: NHC2003"
+      return 0
+   fi
+
+   pass 0 "$FUNCNAME: DataDirect loopback passed for all endpoints (expected >= $expected_bw Gbps)"
+   return 0
+}
+
+function check_ib_bw_gdr_cross_nic(){
+   trap "background_cleanup" RETURN
+
+   local expected_bw=$1
+   local repeats=$2
+   shift 2
+   local -a endpoints=("$@")
+   local -a failures=()
+   local port=18610
+
+   if (( ${#endpoints[@]} < 2 || ${#endpoints[@]} % 2 != 0 )); then
+      die 1 "$FUNCNAME: Specify endpoint pairs as IB_DEVICE:GPU_INDEX. FaultCode: NHCNA"
+      return 0
+   fi
+
+   boost_gpu_clock >/dev/null || {
+      die 1 "$FUNCNAME: Failed to boost GPU clocks. FaultCode: NHCNA"
+      return 0
+   }
+
+   for ((pair_index=0; pair_index<${#endpoints[@]}; pair_index+=2)); do
+      local endpoint_a
+      local endpoint_b
+      local device_a
+      local gpu_a
+      local device_b
+      local gpu_b
+
+      if ! endpoint_a=$(parse_ib_gdr_index_endpoint "${endpoints[$pair_index]}") ||
+         ! endpoint_b=$(parse_ib_gdr_index_endpoint "${endpoints[$((pair_index + 1))]}"); then
+         failures+=("${endpoints[$pair_index]},${endpoints[$((pair_index + 1))]}")
+         continue
+      fi
+      read -r device_a gpu_a <<< "$endpoint_a"
+      read -r device_b gpu_b <<< "$endpoint_b"
+
+      if ! run_ib_bw_gdr_datadirect "$expected_bw" "$port" \
+         "$device_b" "$gpu_b" "$device_a" "$gpu_a" "$repeats" true; then
+         failures+=("$device_a/GPU$gpu_a->$device_b/GPU$gpu_b")
+      fi
+      ((port++))
+
+      if ! run_ib_bw_gdr_datadirect "$expected_bw" "$port" \
+         "$device_a" "$gpu_a" "$device_b" "$gpu_b" "$repeats" true; then
+         failures+=("$device_b/GPU$gpu_b->$device_a/GPU$gpu_a")
+      fi
+      ((port++))
+   done
+
+   remove_clock_boost
+
+   if (( ${#failures[@]} > 0 )); then
+      die 1 "$FUNCNAME: Cross-NIC DataDirect failed for: ${failures[*]} (expected >= $expected_bw Gbps). FaultCode: NHC2003"
+      return 0
+   fi
+
+   pass 0 "$FUNCNAME: Cross-NIC DataDirect passed in both directions (expected >= $expected_bw Gbps)"
+   return 0
+}
